@@ -7,6 +7,7 @@ import { getProvider, CHAINS } from './chains';
 import { calculatePrice } from './pricing';
 import { listJobs } from './jobs';
 import { writeExportFile, getExportFilePath, CONTENT_TYPES } from './exports';
+import { ethers } from 'ethers';
 import { encryptL2aasFile, L2aasFileContent } from './l2aas-format';
 
 const app = express();
@@ -231,12 +232,33 @@ app.post('/api/validate-coupon', (req, res) => {
   });
 });
 
-// Free extraction with coupon — returns encrypted .l2aas file
+// Free extraction with coupon — returns encrypted .l2aas file (ECDH per-wallet encryption)
 app.post('/api/extract-free', async (req, res) => {
-  const { sourceChain, addresses, couponCode } = req.body;
+  const { sourceChain, addresses, couponCode, walletAddress, signature, message } = req.body;
 
   if (!couponCode || !VALID_COUPONS[couponCode.toLowerCase()]) {
     return res.status(400).json({ error: 'Invalid coupon code' });
+  }
+
+  // Verify wallet signature (Sign in with Ethereum)
+  if (!walletAddress || !signature || !message) {
+    return res.status(400).json({ error: 'Wallet signature required — connect your wallet first' });
+  }
+
+  // Recover signer from signature and verify it matches the claimed wallet
+  let customerPublicKey: string;
+  try {
+    const recoveredAddress = ethers.verifyMessage(message, signature);
+    if (recoveredAddress.toLowerCase() !== walletAddress.toLowerCase()) {
+      return res.status(403).json({ error: 'Invalid signature — wallet mismatch' });
+    }
+    // Recover the full public key from the signature for ECDH
+    customerPublicKey = ethers.SigningKey.recoverPublicKey(
+      ethers.hashMessage(message),
+      signature,
+    );
+  } catch {
+    return res.status(400).json({ error: 'Invalid wallet signature' });
   }
 
   if (!sourceChain || !addresses?.length) {
@@ -272,7 +294,8 @@ app.post('/api/extract-free', async (req, res) => {
       },
     };
 
-    const encrypted = encryptL2aasFile(fileContent);
+    // Encrypt with ECDH using customer's wallet public key
+    const encrypted = encryptL2aasFile(fileContent, customerPublicKey);
 
     res.setHeader('Content-Type', 'application/octet-stream');
     res.setHeader(
