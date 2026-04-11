@@ -4,11 +4,12 @@ import helmet from 'helmet';
 import { startMigration, getJob } from './migrator';
 import { readContractState, readMultipleContracts } from './reader';
 import { getProvider, CHAINS } from './chains';
-import { calculatePrice } from './pricing';
+import { calculatePrice, calculateVolumePrice, FREE_TIER_LIMITS, PAID_TIER_LIMITS } from './pricing';
 import { listJobs } from './jobs';
 import { writeExportFile, getExportFilePath, CONTENT_TYPES } from './exports';
 import { ethers } from 'ethers';
 import { encryptL2aasFile, L2aasFileContent } from './l2aas-format';
+import { verifyOwnership } from './ownership';
 
 const app = express();
 const PORT = parseInt(process.env.PORT || '3300', 10);
@@ -17,6 +18,23 @@ const PORT = parseInt(process.env.PORT || '3300', 10);
 app.use(helmet());
 app.use(cors());
 app.use(express.json({ limit: '1mb' }));
+
+// --- Rate limiting and concurrency ---
+
+// Track free extractions per wallet per day
+const freeExtractionTracker = new Map<string, number>(); // wallet -> last extraction timestamp
+
+// Clean up daily
+setInterval(() => {
+  const dayAgo = Date.now() - 86400000;
+  for (const [wallet, ts] of freeExtractionTracker) {
+    if (ts < dayAgo) freeExtractionTracker.delete(wallet);
+  }
+}, 3600000);
+
+// Track concurrent jobs
+let activeJobs = 0;
+const MAX_CONCURRENT = 3;
 
 // --- Routes ---
 
@@ -55,7 +73,8 @@ app.post('/api/preview', async (req, res) => {
 
   try {
     const provider = getProvider(sourceChain);
-    const states = await readMultipleContracts(provider, addresses, 5, slots);
+    const chainId = CHAINS[sourceChain]?.chainId || 0;
+    const states = await readMultipleContracts(provider, addresses, 5, slots, chainId);
 
     const summary = states.map((s) => ({
       address: s.address,
@@ -64,9 +83,18 @@ app.post('/api/preview', async (req, res) => {
       balance: s.balance.toString(),
       nonce: s.nonce,
       storageSlotsFound: s.storageSlots.size,
+      sourceAvailable: s.sourceType || 'none',
+      contractName: s.contractName || null,
     }));
 
-    res.json({ sourceChain, contracts: summary });
+    // Calculate estimated cost based on data volume
+    const estimate = calculateVolumePrice('external', states.map((s) => ({
+      bytecodeSize: (s.bytecode.length - 2) / 2,
+      storageSize: s.storageSlots.size * 64, // 32 bytes key + 32 bytes value per slot
+      isContract: s.isContract,
+    })));
+
+    res.json({ sourceChain, contracts: summary, estimate });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
@@ -84,8 +112,29 @@ app.post('/api/estimate', async (req, res) => {
     return res.status(400).json({ error: `Unsupported source chain: ${sourceChain}` });
   }
 
-  const price = calculatePrice(destChain, addresses.length);
-  res.json(price);
+  // Read contract sizes for volume-based estimate
+  try {
+    const provider = getProvider(sourceChain);
+    const contracts = await Promise.all(addresses.map(async (addr: string) => {
+      const code = await provider.getCode(addr);
+      const isContract = code !== '0x';
+      return {
+        address: addr,
+        isContract,
+        bytecodeSize: isContract ? (code.length - 2) / 2 : 0, // hex to bytes
+        storageSize: 0, // Estimated during full extraction
+      };
+    }));
+
+    const estimate = calculateVolumePrice(destChain, contracts);
+    // Also include legacy flat-rate for comparison
+    const legacyPrice = calculatePrice(destChain, addresses.length);
+    res.json({ ...estimate, legacyPrice });
+  } catch (err: any) {
+    // Fallback to flat-rate if volume estimate fails
+    const price = calculatePrice(destChain, addresses.length);
+    res.json(price);
+  }
 });
 
 // Start migration
@@ -108,15 +157,22 @@ app.post('/api/migrate', async (req, res) => {
     return res.status(400).json({ error: 'destWalletKey required for external chain migration' });
   }
 
-  if (addresses.length > 100) {
-    return res.status(400).json({ error: 'Maximum 100 addresses per migration job' });
+  if (addresses.length > PAID_TIER_LIMITS.maxContracts) {
+    return res.status(400).json({ error: `Maximum ${PAID_TIER_LIMITS.maxContracts} addresses per migration job` });
   }
 
+  if (activeJobs >= MAX_CONCURRENT) {
+    return res.status(429).json({ error: 'Server busy. Please try again in a few minutes.' });
+  }
+
+  activeJobs++;
   try {
     const jobId = await startMigration(sourceChain, destChain, addresses, destWalletKey, slots);
     res.json({ jobId, status: 'started' });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
+  } finally {
+    activeJobs--;
   }
 });
 
@@ -269,13 +325,40 @@ app.post('/api/extract-free', async (req, res) => {
     return res.status(400).json({ error: `Unsupported chain: ${sourceChain}` });
   }
 
-  if (addresses.length > 100) {
-    return res.status(400).json({ error: 'Maximum 100 addresses per extraction' });
+  // Free tier limits
+  if (addresses.length > FREE_TIER_LIMITS.maxContracts) {
+    return res.status(400).json({ error: `Free tier limited to ${FREE_TIER_LIMITS.maxContracts} contracts per extraction` });
   }
 
+  // Rate limit: 1 free extraction per wallet per day
+  const walletKey = walletAddress.toLowerCase();
+  const lastExtraction = freeExtractionTracker.get(walletKey);
+  if (lastExtraction && Date.now() - lastExtraction < 86400000) {
+    return res.status(429).json({ error: 'Free tier: 1 extraction per day per wallet. Try again tomorrow.' });
+  }
+
+  // Concurrency limit
+  if (activeJobs >= MAX_CONCURRENT) {
+    return res.status(429).json({ error: 'Server busy. Please try again in a few minutes.' });
+  }
+
+  activeJobs++;
   try {
     const provider = getProvider(sourceChain);
-    const states = await readMultipleContracts(provider, addresses, 5);
+    const chainId = CHAINS[sourceChain]?.chainId || 0;
+
+    // Ownership verification: free tier requires you own the contracts
+    for (const addr of addresses) {
+      const check = await verifyOwnership(provider, addr, walletAddress);
+      if (!check.isOwner) {
+        return res.status(403).json({
+          error: `Cannot verify ownership of ${addr}. Free extraction is limited to contracts you own or deployed. Use paid extraction for third-party contracts.`,
+          address: addr,
+          reason: check.reason,
+        });
+      }
+    }
+    const states = await readMultipleContracts(provider, addresses, 5, undefined, chainId);
 
     const fileContent: L2aasFileContent = {
       version: 1,
@@ -286,6 +369,10 @@ app.post('/api/extract-free', async (req, res) => {
         bytecode: s.bytecode,
         storage: Object.fromEntries(s.storageSlots),
         balance: s.balance.toString(),
+        source: s.source,
+        sourceType: s.sourceType,
+        contractName: s.contractName,
+        compiler: s.compiler,
       })),
       metadata: {
         contractCount: states.filter((s) => s.isContract).length,
@@ -302,9 +389,14 @@ app.post('/api/extract-free', async (req, res) => {
       'Content-Disposition',
       `attachment; filename="chainclone-export-${Date.now()}.l2aas"`,
     );
+    // Track successful free extraction
+    freeExtractionTracker.set(walletKey, Date.now());
+
     res.send(encrypted);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
+  } finally {
+    activeJobs--;
   }
 });
 

@@ -68,3 +68,72 @@ export function estimateGasCost(
   const estimatedGas = gasPerContract + (BigInt(totalBytecodeBytes) * gasPerByte);
   return estimatedGas * gasPrice;
 }
+
+// --- Volume-based pricing ---
+
+export interface VolumeEstimate {
+  contracts: number;
+  totalBytecodeBytes: number;
+  totalStorageBytes: number;
+  totalDataMB: number;
+  baseFee: number;          // $5 per contract
+  storageFeeMB: number;     // $2 per MB of storage
+  bytecodeFeeMB: number;    // $1 per MB of bytecode
+  totalUSDC: number;
+  breakdown: string;
+}
+
+export function calculateVolumePrice(
+  destChain: string,
+  contracts: Array<{ bytecodeSize: number; storageSize: number; isContract: boolean }>,
+): VolumeEstimate {
+  const contractCount = contracts.filter(c => c.isContract).length;
+  const totalBytecodeBytes = contracts.reduce((sum, c) => sum + c.bytecodeSize, 0);
+  const totalStorageBytes = contracts.reduce((sum, c) => sum + c.storageSize, 0);
+  const totalDataMB = (totalBytecodeBytes + totalStorageBytes) / (1024 * 1024);
+
+  // Base fee per contract
+  const baseFeePerContract = destChain === 'l2aas' ? 0 : 5;
+  const baseFee = contractCount * baseFeePerContract;
+
+  // Storage fee: $2 per MB
+  const storageMB = totalStorageBytes / (1024 * 1024);
+  const storageFee = Math.ceil(storageMB * 2 * 100) / 100;
+
+  // Bytecode fee: $1 per MB
+  const bytecodeMB = totalBytecodeBytes / (1024 * 1024);
+  const bytecodeFee = Math.ceil(bytecodeMB * 1 * 100) / 100;
+
+  // Minimum charge: $5 (even for tiny contracts)
+  const rawTotal = baseFee + storageFee + bytecodeFee;
+  const totalUSDC = destChain === 'l2aas' ? 0 : Math.max(5, rawTotal);
+
+  return {
+    contracts: contractCount,
+    totalBytecodeBytes,
+    totalStorageBytes,
+    totalDataMB: Math.round(totalDataMB * 100) / 100,
+    baseFee,
+    storageFeeMB: storageFee,
+    bytecodeFeeMB: bytecodeFee,
+    totalUSDC,
+    breakdown: destChain === 'l2aas'
+      ? 'FREE with l2aas coupon'
+      : `Base: $${baseFee} (${contractCount} contracts x $5) + Storage: $${storageFee} (${storageMB.toFixed(2)} MB x $2) + Bytecode: $${bytecodeFee} (${bytecodeMB.toFixed(2)} MB x $1) = $${totalUSDC}`,
+  };
+}
+
+// Free tier limits
+export const FREE_TIER_LIMITS = {
+  maxContracts: 50,
+  maxDataMB: 10,           // 10 MB max for free extraction
+  maxExtractionsPerDay: 1, // 1 free extraction per wallet per day
+};
+
+// Paid tier limits (still need limits to prevent abuse)
+export const PAID_TIER_LIMITS = {
+  maxContracts: 500,
+  maxDataMB: 1000,         // 1 GB max per extraction
+  maxConcurrentJobs: 3,
+  jobTimeoutMinutes: 10,
+};
