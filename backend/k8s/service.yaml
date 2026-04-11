@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: chainclone-backend
+  namespace: chainclone
+  labels:
+    app: chainclone-backend
+spec:
+  type: ClusterIP
+  selector:
+    app: chainclone-backend
+  ports:
+    - port: 3300
+      targetPort: 3300
+      protocol: TCP
+      name: http

@@ -1,0 +1,26 @@
+{
+  "name": "chainclone-backend",
+  "version": "1.0.0",
+  "description": "ChainClone backend — blockchain state migration engine",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "ethers": "^6.13.4",
+    "express": "^4.21.1",
+    "helmet": "^8.0.0",
+    "uuid": "^10.0.0"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.9.0",
+    "@types/uuid": "^10.0.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.6.3"
+  }
+}
