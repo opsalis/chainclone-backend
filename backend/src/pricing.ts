@@ -1,139 +1,84 @@
-import { PriceEstimate } from './types';
-
-// Base price per contract in USDC by destination chain
-const BASE_PRICES: Record<string, number> = {
-  ethereum: 50,    // Expensive gas
-  base: 5,
-  optimism: 5,
-  arbitrum: 5,
-  polygon: 5,
-  avalanche: 5,
-  bsc: 3,
-  sepolia: 0.01,          // Testnet — nearly free
-  'base-sepolia': 0.01,   // Testnet — nearly free
+// Exact prices per contract in USDC by destination chain
+// These are deliberately odd numbers — they look calculated, not rounded
+export const CONTRACT_PRICES: Record<string, number> = {
+  l2aas:    0,       // Always free — incentive to use L2aaS
+  zip:      47.50,   // Export to ZIP file
+  base:     97.53,   // Base L2
+  arbitrum: 97.53,   // Arbitrum One
+  optimism: 97.53,   // Optimism
+  polygon:  97.53,   // Polygon
+  bsc:      31.17,   // BNB Chain
+  ethereum: 478.21,  // Ethereum L1 (includes mainnet gas budget)
 };
 
+export interface PriceEstimate {
+  destChain: string;
+  contractCount: number;
+  pricePerContract: number;
+  discountPct: number;
+  subtotal: number;
+  discountAmount: number;
+  totalUSDC: number;
+  isFree: boolean;
+  message: string;
+}
+
 /**
- * Calculate migration price based on destination chain and contract count.
- * L2aaS migrations are always free (incentive to use our chain).
+ * Volume discount tiers
+ */
+export function getDiscountPct(contractCount: number): number {
+  if (contractCount >= 100) return 0.40;
+  if (contractCount >= 50)  return 0.30;
+  if (contractCount >= 20)  return 0.20;
+  if (contractCount >= 10)  return 0.10;
+  if (contractCount >= 5)   return 0.05;
+  return 0;
+}
+
+/**
+ * Calculate total price for a migration order.
+ * contractCount should be the number of valid (non-error) contracts.
  */
 export function calculatePrice(destChain: string, contractCount: number): PriceEstimate {
-  // L2aaS is free — we want customers on our chain
-  if (destChain === 'l2aas') {
+  const pricePerContract = CONTRACT_PRICES[destChain] ?? 97.53;
+  const isFree = pricePerContract === 0;
+
+  if (isFree) {
     return {
       destChain,
       contractCount,
       pricePerContract: 0,
-      discount: '0%',
+      discountPct: 0,
+      subtotal: 0,
+      discountAmount: 0,
       totalUSDC: 0,
-      message: 'FREE — migrate to your own L2aaS blockchain',
+      isFree: true,
+      message: 'Free migration to your L2aaS chain',
     };
   }
 
-  const pricePerContract = BASE_PRICES[destChain] || 10;
-
-  // Volume discount tiers
-  let discount = 0;
-  if (contractCount >= 100) discount = 0.40;
-  else if (contractCount >= 50) discount = 0.30;
-  else if (contractCount >= 20) discount = 0.20;
-  else if (contractCount >= 10) discount = 0.10;
-  else if (contractCount >= 5) discount = 0.05;
-
-  const discountedPrice = pricePerContract * (1 - discount);
-  const total = Math.round(discountedPrice * contractCount * 100) / 100;
+  const discountPct = getDiscountPct(contractCount);
+  const discountedPricePerContract = pricePerContract * (1 - discountPct);
+  const subtotal = Math.round(pricePerContract * contractCount * 100) / 100;
+  const discountAmount = Math.round(pricePerContract * contractCount * discountPct * 100) / 100;
+  const totalUSDC = Math.round(discountedPricePerContract * contractCount * 100) / 100;
 
   return {
     destChain,
     contractCount,
-    pricePerContract: Math.round(discountedPrice * 100) / 100,
-    discount: (discount * 100) + '%',
-    totalUSDC: total,
-    message: `Migration to ${destChain}: $${total} USDC (${contractCount} contracts)`,
-  };
-}
-
-/**
- * Estimate gas cost for deploying contracts on destination chain.
- * Used for internal cost analysis, not shown to customer directly.
- */
-export function estimateGasCost(
-  destChain: string,
-  totalBytecodeBytes: number,
-  gasPrice: bigint,
-): bigint {
-  // Rough estimate: 200 gas per byte of bytecode + 32000 base
-  const gasPerContract = 32000n;
-  const gasPerByte = 200n;
-  const estimatedGas = gasPerContract + (BigInt(totalBytecodeBytes) * gasPerByte);
-  return estimatedGas * gasPrice;
-}
-
-// --- Volume-based pricing ---
-
-export interface VolumeEstimate {
-  contracts: number;
-  totalBytecodeBytes: number;
-  totalStorageBytes: number;
-  totalDataMB: number;
-  baseFee: number;          // $5 per contract
-  storageFeeMB: number;     // $2 per MB of storage
-  bytecodeFeeMB: number;    // $1 per MB of bytecode
-  totalUSDC: number;
-  breakdown: string;
-}
-
-export function calculateVolumePrice(
-  destChain: string,
-  contracts: Array<{ bytecodeSize: number; storageSize: number; isContract: boolean }>,
-): VolumeEstimate {
-  const contractCount = contracts.filter(c => c.isContract).length;
-  const totalBytecodeBytes = contracts.reduce((sum, c) => sum + c.bytecodeSize, 0);
-  const totalStorageBytes = contracts.reduce((sum, c) => sum + c.storageSize, 0);
-  const totalDataMB = (totalBytecodeBytes + totalStorageBytes) / (1024 * 1024);
-
-  // Base fee per contract
-  const baseFeePerContract = destChain === 'l2aas' ? 0 : 5;
-  const baseFee = contractCount * baseFeePerContract;
-
-  // Storage fee: $2 per MB
-  const storageMB = totalStorageBytes / (1024 * 1024);
-  const storageFee = Math.ceil(storageMB * 2 * 100) / 100;
-
-  // Bytecode fee: $1 per MB
-  const bytecodeMB = totalBytecodeBytes / (1024 * 1024);
-  const bytecodeFee = Math.ceil(bytecodeMB * 1 * 100) / 100;
-
-  // Minimum charge: $5 (even for tiny contracts)
-  const rawTotal = baseFee + storageFee + bytecodeFee;
-  const totalUSDC = destChain === 'l2aas' ? 0 : Math.max(5, rawTotal);
-
-  return {
-    contracts: contractCount,
-    totalBytecodeBytes,
-    totalStorageBytes,
-    totalDataMB: Math.round(totalDataMB * 100) / 100,
-    baseFee,
-    storageFeeMB: storageFee,
-    bytecodeFeeMB: bytecodeFee,
+    pricePerContract: Math.round(discountedPricePerContract * 100) / 100,
+    discountPct,
+    subtotal,
+    discountAmount,
     totalUSDC,
-    breakdown: destChain === 'l2aas'
-      ? 'FREE with l2aas coupon'
-      : `Base: $${baseFee} (${contractCount} contracts x $5) + Storage: $${storageFee} (${storageMB.toFixed(2)} MB x $2) + Bytecode: $${bytecodeFee} (${bytecodeMB.toFixed(2)} MB x $1) = $${totalUSDC}`,
+    isFree: false,
+    message: `${contractCount} contract${contractCount !== 1 ? 's' : ''} to ${destChain}: $${totalUSDC} USDC${discountPct > 0 ? ` (${(discountPct * 100).toFixed(0)}% volume discount)` : ''}`,
   };
 }
 
-// Free tier limits
-export const FREE_TIER_LIMITS = {
-  maxContracts: 50,
-  maxDataMB: 10,           // 10 MB max for free extraction
-  maxExtractionsPerDay: 1, // 1 free extraction per wallet per day
-};
-
-// Paid tier limits (still need limits to prevent abuse)
-export const PAID_TIER_LIMITS = {
-  maxContracts: 500,
-  maxDataMB: 1000,         // 1 GB max per extraction
-  maxConcurrentJobs: 3,
-  jobTimeoutMinutes: 10,
+// Limits
+export const LIMITS = {
+  maxContractsPerOrder: 100,
+  jobRetentionDays: 30,
+  sampleFirstContractOnly: true,
 };

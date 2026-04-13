@@ -9,6 +9,7 @@
     "dev": "ts-node src/index.ts"
   },
   "dependencies": {
+    "archiver": "^7.0.1",
     "cors": "^2.8.5",
     "ethers": "^6.13.4",
     "express": "^4.21.1",
@@ -16,6 +17,7 @@
     "uuid": "^10.0.0"
   },
   "devDependencies": {
+    "@types/archiver": "^6.0.4",
     "@types/cors": "^2.8.17",
     "@types/express": "^5.0.0",
     "@types/node": "^22.9.0",

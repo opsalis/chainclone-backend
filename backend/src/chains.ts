@@ -79,16 +79,25 @@ export const CHAINS: Record<string, ChainConfig> = {
 
 /**
  * Get an ethers provider for a chain.
- * Prefers RPCaaS endpoint when available, falls back to public RPCs.
- * Rotates through fallback RPCs on failure.
+ * Prefers ChainRPC endpoint when available, falls back to public RPCs.
  */
 export function getProvider(chain: string): ethers.JsonRpcProvider {
   const config = CHAINS[chain];
   if (!config) {
     throw new Error(`Unsupported chain: ${chain}. Supported: ${Object.keys(CHAINS).join(', ')}`);
   }
-  const url = config.rpcaasUrl || config.rpcUrls[0];
+  // Prefer ChainRPC for reliability
+  const chainrpcUrl = `https://${chain}.chainrpc.net`;
+  const url = config.rpcaasUrl || chainrpcUrl;
   return new ethers.JsonRpcProvider(url);
+}
+
+/**
+ * Get a provider for a custom RPC URL (for custom EVM chains).
+ */
+export function getCustomProvider(rpcUrl: string): ethers.JsonRpcProvider {
+  if (!rpcUrl) throw new Error('Custom RPC URL is required');
+  return new ethers.JsonRpcProvider(rpcUrl);
 }
 
 /**

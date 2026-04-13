@@ -1,6 +1,7 @@
 import { ethers } from 'ethers';
 import { ContractState } from './types';
 import { enumerateStorage } from './storage';
+import { getContractSource } from './decompiler';
 
 /**
  * Read a single contract's complete on-chain state.
@@ -9,6 +10,7 @@ export async function readContractState(
   provider: ethers.JsonRpcProvider,
   address: string,
   userSlots?: string[],
+  chainId?: number,
 ): Promise<ContractState> {
   // Validate address
   if (!ethers.isAddress(address)) {
@@ -31,6 +33,25 @@ export async function readContractState(
     storageSlots = await enumerateStorage(provider, checksumAddress, bytecode, userSlots);
   }
 
+  // Fetch source code for contracts (verified source, decompiled, or bytecode-only)
+  let source: string | undefined;
+  let sourceType: string | undefined;
+  let contractName: string | undefined;
+  let compiler: string | undefined;
+
+  if (isContract && chainId) {
+    try {
+      const sourceResult = await getContractSource(checksumAddress, bytecode, chainId);
+      source = sourceResult.source;
+      sourceType = sourceResult.sourceType;
+      contractName = sourceResult.contractName;
+      compiler = sourceResult.compiler;
+    } catch {
+      // Source recovery is best-effort — never block the extraction
+      sourceType = 'bytecode-only';
+    }
+  }
+
   return {
     address: checksumAddress,
     bytecode,
@@ -38,6 +59,10 @@ export async function readContractState(
     nonce,
     storageSlots,
     isContract,
+    source,
+    sourceType,
+    contractName,
+    compiler,
   };
 }
 
@@ -49,6 +74,7 @@ export async function readMultipleContracts(
   addresses: string[],
   concurrency: number = 5,
   userSlots?: string[],
+  chainId?: number,
 ): Promise<ContractState[]> {
   const results: ContractState[] = [];
 
@@ -56,7 +82,7 @@ export async function readMultipleContracts(
   for (let i = 0; i < addresses.length; i += concurrency) {
     const batch = addresses.slice(i, i + concurrency);
     const batchResults = await Promise.all(
-      batch.map((addr) => readContractState(provider, addr, userSlots))
+      batch.map((addr) => readContractState(provider, addr, userSlots, chainId))
     );
     results.push(...batchResults);
   }
@@ -71,3 +97,8 @@ export async function isContract(provider: ethers.JsonRpcProvider, address: stri
   const code = await provider.getCode(address);
   return code !== '0x';
 }
+
+/**
+ * Alias for readContractState — used in the analyze endpoint.
+ */
+export const readSingleContract = readContractState;

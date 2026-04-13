@@ -1,9 +1,15 @@
 import { ethers } from 'ethers';
 import { readContractState } from './reader';
 import { generateGenesisAlloc, deployToExternalChain } from './writer';
-import { getProvider } from './chains';
+import { getProvider, getCustomProvider, CHAINS } from './chains';
 import { createJob, getJob, updateJob } from './jobs';
 import { MigrationJob, MigrationResult, ContractState } from './types';
+
+export interface MigrationOptions {
+  customRpc?: string;
+  l2aasChainId?: string;
+  paymentTx?: string;
+}
 
 /**
  * Start a new migration job.
@@ -15,13 +21,14 @@ export async function startMigration(
   addresses: string[],
   destWalletKey?: string,
   userSlots?: string[],
+  options?: MigrationOptions,
 ): Promise<string> {
   const jobId = crypto.randomUUID();
 
   const job = createJob(jobId, sourceChain, destChain, addresses);
 
   // Run migration async — don't await
-  runMigration(job, destWalletKey, userSlots).catch((err) => {
+  runMigration(job, destWalletKey, userSlots, options).catch((err) => {
     updateJob(jobId, { status: 'failed', error: err.message });
   });
 
@@ -35,8 +42,11 @@ async function runMigration(
   job: MigrationJob,
   destWalletKey?: string,
   userSlots?: string[],
+  options?: MigrationOptions,
 ): Promise<void> {
-  const sourceProvider = getProvider(job.sourceChain);
+  const sourceProvider = options?.customRpc
+    ? getCustomProvider(options.customRpc)
+    : getProvider(job.sourceChain);
 
   // Phase 1: Read all contract states from source chain
   updateJob(job.id, { status: 'reading' });
@@ -44,7 +54,8 @@ async function runMigration(
   const states: ContractState[] = [];
   for (let i = 0; i < job.addresses.length; i++) {
     try {
-      const state = await readContractState(sourceProvider, job.addresses[i], userSlots);
+      const chainId = CHAINS[job.sourceChain]?.chainId || 0;
+      const state = await readContractState(sourceProvider, job.addresses[i], userSlots, chainId);
       states.push(state);
     } catch (err: any) {
       console.error(`Failed to read ${job.addresses[i]}: ${err.message}`);
