@@ -79,16 +79,15 @@ export const CHAINS: Record<string, ChainConfig> = {
 
 /**
  * Get an ethers provider for a chain.
- * Prefers ChainRPC endpoint when available, falls back to public RPCs.
+ * Uses the first public RPC URL for the chain (no chainrpc dependency).
  */
 export function getProvider(chain: string): ethers.JsonRpcProvider {
   const config = CHAINS[chain];
   if (!config) {
     throw new Error(`Unsupported chain: ${chain}. Supported: ${Object.keys(CHAINS).join(', ')}`);
   }
-  // Prefer ChainRPC for reliability
-  const chainrpcUrl = `https://${chain}.chainrpc.net`;
-  const url = config.rpcaasUrl || chainrpcUrl;
+  // Use configured public RPCs directly — most reliable for cross-cluster access
+  const url = config.rpcaasUrl || config.rpcUrls[0];
   return new ethers.JsonRpcProvider(url);
 }
 
