@@ -5,6 +5,7 @@ metadata:
   namespace: chainclone
   labels:
     app: chainclone-backend
+    version: "2.0"
 spec:
   replicas: 2
   selector:
@@ -26,23 +27,74 @@ spec:
               value: "3300"
             - name: NODE_ENV
               value: "production"
+            - name: MAX_CONCURRENT_JOBS
+              value: "3"
+            - name: EXPORTS_DIR
+              value: "/app/data/exports"
+            - name: CHAINCLONE_REVENUE_WALLET
+              valueFrom:
+                secretKeyRef:
+                  name: chainclone-secrets
+                  key: revenue-wallet
+                  optional: true
+            - name: PAYMENT_CHAIN_RPC
+              valueFrom:
+                secretKeyRef:
+                  name: chainclone-secrets
+                  key: payment-chain-rpc
+                  optional: true
+            - name: DEMO_L2_RPC
+              valueFrom:
+                configMapKeyRef:
+                  name: chainclone-config
+                  key: demo-l2-rpc
+                  optional: true
           resources:
             requests:
-              memory: "128Mi"
-              cpu: "100m"
+              memory: "256Mi"
+              cpu: "200m"
             limits:
-              memory: "512Mi"
-              cpu: "500m"
+              memory: "1Gi"
+              cpu: "1000m"
+          volumeMounts:
+            - name: exports
+              mountPath: /app/data/exports
           livenessProbe:
             httpGet:
               path: /health
               port: 3300
-            initialDelaySeconds: 10
+            initialDelaySeconds: 15
             periodSeconds: 30
+            failureThreshold: 3
           readinessProbe:
             httpGet:
               path: /health
               port: 3300
             initialDelaySeconds: 5
             periodSeconds: 10
+      volumes:
+        - name: exports
+          persistentVolumeClaim:
+            claimName: chainclone-exports-pvc
       restartPolicy: Always
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: chainclone-exports-pvc
+  namespace: chainclone
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 50Gi
+  storageClassName: longhorn
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: chainclone-config
+  namespace: chainclone
+data:
+  demo-l2-rpc: "http://demo-l2-geth:8545"

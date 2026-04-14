@@ -9,6 +9,7 @@ import { getProvider, getCustomProvider, CHAINS } from './chains';
 import { calculatePrice, LIMITS, CONTRACT_PRICES } from './pricing';
 import { listJobs } from './jobs';
 import { ethers } from 'ethers';
+import { apiRouter } from './api';
 
 const app = express();
 const PORT = parseInt(process.env.PORT || '3300', 10);
@@ -17,6 +18,9 @@ const PORT = parseInt(process.env.PORT || '3300', 10);
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors());
 app.use(express.json({ limit: '1mb' }));
+
+// --- v2 API routes (quote / order / sample / download) ---
+app.use('/api', apiRouter);
 
 // Track concurrent jobs
 let activeJobs = 0;
