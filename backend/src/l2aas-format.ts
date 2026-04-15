@@ -16,6 +16,10 @@ export interface L2aasFileContent {
     bytecode: string;
     storage: Record<string, string>;
     balance: string;
+    source?: string;
+    sourceType?: string;
+    contractName?: string;
+    compiler?: string;
   }>;
   metadata: {
     contractCount: number;

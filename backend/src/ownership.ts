@@ -48,7 +48,7 @@ export async function verifyOwnership(
     if (apiUrl) {
       const url = `${apiUrl}?module=contract&action=getcontractcreation&contractaddresses=${contractAddress}`;
       const resp = await fetch(url, { signal: AbortSignal.timeout(5_000) });
-      const data = await resp.json();
+      const data: any = await resp.json();
       if (data.status === '1' && data.result?.length > 0) {
         const creator = data.result[0].contractCreator;
         if (creator && creator.toLowerCase() === walletAddress.toLowerCase()) {

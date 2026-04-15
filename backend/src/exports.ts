@@ -30,6 +30,10 @@ interface ExportRow {
   originalAddress: string;
   newAddress: string;
   txHash: string;
+  source?: string;
+  sourceType?: string;
+  contractName?: string;
+  compiler?: string;
 }
 
 function jobToRows(job: MigrationJob): ExportRow[] {
@@ -38,6 +42,10 @@ function jobToRows(job: MigrationJob): ExportRow[] {
     originalAddress: c.originalAddress,
     newAddress: c.newAddress,
     txHash: c.txHash,
+    source: (c as any).source,
+    sourceType: (c as any).sourceType,
+    contractName: (c as any).contractName,
+    compiler: (c as any).compiler,
   }));
 }
 
@@ -48,7 +56,13 @@ export function toJSON(job: MigrationJob): string {
     destChain: job.destChain,
     status: job.status,
     contractsMigrated: job.result?.contractsMigrated || 0,
-    contracts: jobToRows(job),
+    contracts: jobToRows(job).map(r => ({
+      ...r,
+      source: r.source || null,
+      sourceType: r.sourceType || null,
+      contractName: r.contractName || null,
+      compiler: r.compiler || null,
+    })),
     genesisAlloc: job.result?.genesisAlloc || null,
     totalGasUsed: job.result?.totalGasUsed || null,
     createdAt: new Date(job.createdAt).toISOString(),
@@ -57,9 +71,15 @@ export function toJSON(job: MigrationJob): string {
 
 export function toCSV(job: MigrationJob): string {
   const rows = jobToRows(job);
-  const header = 'originalAddress,newAddress,txHash';
-  const lines = rows.map(r => `${r.originalAddress},${r.newAddress},${r.txHash}`);
-  return [header, ...lines].join('\n');
+  const header = 'originalAddress,newAddress,txHash,sourceType,contractName,compiler';
+  const lines = rows.map(r => {
+    // CSV-escape source fields (contract names and compilers may contain commas)
+    const name = r.contractName ? `"${r.contractName.replace(/"/g, '""')}"` : '';
+    const comp = r.compiler ? `"${r.compiler.replace(/"/g, '""')}"` : '';
+    return `${r.originalAddress},${r.newAddress},${r.txHash},${r.sourceType || ''},${name},${comp}`;
+  });
+  // Note: Full source code is omitted from CSV due to length. Use JSON or XML for full source.
+  return ['# Source code omitted from CSV — use JSON or XML export for full source', header, ...lines].join('\n');
 }
 
 export function toXML(job: MigrationJob): string {
@@ -74,11 +94,19 @@ export function toXML(job: MigrationJob): string {
     xml += `      <originalAddress>${r.originalAddress}</originalAddress>\n`;
     xml += `      <newAddress>${r.newAddress}</newAddress>\n`;
     xml += `      <txHash>${r.txHash}</txHash>\n`;
+    if (r.sourceType) xml += `      <sourceType>${r.sourceType}</sourceType>\n`;
+    if (r.contractName) xml += `      <contractName>${escapeXml(r.contractName)}</contractName>\n`;
+    if (r.compiler) xml += `      <compiler>${escapeXml(r.compiler)}</compiler>\n`;
+    if (r.source) xml += `      <source><![CDATA[${r.source}]]></source>\n`;
     xml += `    </contract>\n`;
   }
   xml += '  </contracts>\n';
   xml += '</migration>\n';
   return xml;
+}
+
+function escapeXml(str: string): string {
+  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
 export function writeExportFile(job: MigrationJob, format: 'json' | 'csv' | 'xml'): string {

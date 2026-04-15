@@ -11,6 +11,7 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm ci --only=production && npm cache clean --force
 COPY --from=builder /app/dist/ ./dist/
+RUN mkdir -p /app/data/exports && chown -R node:node /app/data
 EXPOSE 3300
 USER node
 CMD ["node", "dist/index.js"]

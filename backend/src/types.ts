@@ -14,6 +14,10 @@ export interface ContractState {
   nonce: number;
   storageSlots: Map<string, string>;
   isContract: boolean;
+  source?: string;            // Source code (verified, decompiled, or bytecode-only)
+  sourceType?: string;        // 'verified' | 'decompiled' | 'bytecode-only'
+  contractName?: string;      // From Etherscan if verified
+  compiler?: string;          // Compiler version if verified
 }
 
 export interface DeployedContract {
