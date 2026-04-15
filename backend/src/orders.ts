@@ -137,20 +137,34 @@ setInterval(() => {
 // ---------------------------------------------------------------------------
 
 /**
- * Payment chain: Demo L2 (845302) for testnet, Base (8453) for mainnet.
- * The USDC contract address must match the chain.
+ * OpsalisBilling payment verification.
+ *
+ * Payment flow:
+ *   1. Customer calls USDC.approve(OpsalisBilling, amount)
+ *   2. Customer calls OpsalisBilling.pay(serviceId, productId, amount)
+ *   3. Contract transfers USDC to ChainClone revenue wallet and emits
+ *        Paid(serviceId, productId, customer, amount, timestamp)
+ *
+ * Backend verifies by reading the transaction receipt and matching:
+ *   - A Paid log emitted by OpsalisBilling
+ *   - serviceId == keccak256("chainclone")
+ *   - amount    >= quote totalUSDC
  */
+
+const OPSALIS_BILLING = (
+  process.env.OPSALIS_BILLING_ADDRESS || '0xCEfD64724E6EAbD3372188d3b558b1e74dD27Bc6'
+).toLowerCase();
+
 const PAYMENT_CHAIN_RPCS: Record<number, string> = {
-  845302: process.env.DEMO_L2_RPC   || 'http://demo-l2-geth:8545',
-  845312: process.env.DEMO_L2_RPC   || 'http://demo-l2-geth:8545',   // chain ID from mission spec
-  84532:  'https://sepolia.base.org',                                  // Base Sepolia testnet
-  8453:   'https://mainnet.base.org',                                  // Base mainnet
+  845312: process.env.DEMO_L2_RPC || 'http://l2-rpc.opsalis-l2-demo.svc.cluster.local:8545',
 };
 
-/** ChainClone revenue wallet — USDC must be sent here */
-const REVENUE_WALLET = process.env.CHAINCLONE_REVENUE_WALLET || '0x0000000000000000000000000000000000000001';
+// keccak256("chainclone")
+const CHAINCLONE_SERVICE_ID = ethers.keccak256(ethers.toUtf8Bytes('chainclone')).toLowerCase();
 
-/** Minimum USDC amount: quote total (6 decimals for USDC) */
+// keccak256("Paid(bytes32,bytes32,address,uint256,uint256)")
+const PAID_TOPIC = ethers.id('Paid(bytes32,bytes32,address,uint256,uint256)').toLowerCase();
+
 function toUSDCUnits(usd: number): bigint {
   return BigInt(Math.floor(usd * 1_000_000));
 }
@@ -159,6 +173,8 @@ export interface PaymentVerifyResult {
   ok: boolean;
   reason?: string;
   paidAmountUSDC?: number;
+  productId?: string;
+  customer?: string;
 }
 
 export async function verifyPayment(
@@ -166,7 +182,6 @@ export async function verifyPayment(
   paymentChainId: number,
   expectedAmountUSD: number,
 ): Promise<PaymentVerifyResult> {
-  // Demo bypass: allow "demo-*" tx hashes in dev
   if (txHash.startsWith('demo-') && process.env.NODE_ENV !== 'production') {
     return { ok: true, paidAmountUSDC: expectedAmountUSD };
   }
@@ -178,42 +193,43 @@ export async function verifyPayment(
 
   try {
     const provider = new ethers.JsonRpcProvider(rpcUrl);
-
-    // 1. Transaction must exist and be confirmed
     const receipt = await provider.getTransactionReceipt(txHash);
     if (!receipt) {
-      return { ok: false, reason: 'Transaction not found — may still be pending, try again in 30 seconds' };
+      return { ok: false, reason: 'Transaction not found — may still be pending, retry in 30 seconds' };
     }
     if (receipt.status !== 1) {
       return { ok: false, reason: 'Transaction reverted on-chain' };
     }
 
-    // 2. Check it's a USDC Transfer to our revenue wallet
-    //    USDC Transfer event: Transfer(address indexed from, address indexed to, uint256 value)
-    //    topic0: keccak256("Transfer(address,address,uint256)")
-    const TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
-    const revenueWalletPadded = '0x000000000000000000000000' + REVENUE_WALLET.slice(2).toLowerCase();
-
+    // Locate Paid(serviceId, productId, customer, amount, timestamp) from OpsalisBilling
     let paidAmount = 0n;
+    let productId: string | undefined;
+    let customer: string | undefined;
     for (const log of receipt.logs) {
-      if (
-        log.topics[0] === TRANSFER_TOPIC &&
-        log.topics[2]?.toLowerCase() === revenueWalletPadded.toLowerCase()
-      ) {
-        paidAmount += BigInt(log.data);
-      }
+      if (log.address.toLowerCase() !== OPSALIS_BILLING) continue;
+      if (log.topics[0]?.toLowerCase() !== PAID_TOPIC) continue;
+      const loggedServiceId = log.topics[1]?.toLowerCase();
+      if (loggedServiceId !== CHAINCLONE_SERVICE_ID) continue;
+      productId = log.topics[2];
+      customer = '0x' + (log.topics[3] || '').slice(26);
+      // data = amount (32 bytes) + timestamp (32 bytes)
+      const amountHex = '0x' + log.data.slice(2, 2 + 64);
+      paidAmount += BigInt(amountHex);
     }
 
     if (paidAmount === 0n) {
-      return { ok: false, reason: `No USDC transfer to ChainClone revenue wallet found in this transaction` };
+      return {
+        ok: false,
+        reason: 'No OpsalisBilling.Paid event for ChainClone found in this transaction',
+      };
     }
 
-    const requiredUnits = toUSDCUnits(expectedAmountUSD);
-    if (paidAmount < requiredUnits) {
+    const required = toUSDCUnits(expectedAmountUSD);
+    if (paidAmount < required) {
       const paidUSD = Number(paidAmount) / 1_000_000;
       return {
         ok: false,
-        reason: `Insufficient payment: received $${paidUSD.toFixed(2)} USDC, required $${expectedAmountUSD.toFixed(2)} USDC`,
+        reason: `Insufficient payment: $${paidUSD.toFixed(2)} USDC, required $${expectedAmountUSD.toFixed(2)} USDC`,
         paidAmountUSDC: paidUSD,
       };
     }
@@ -221,9 +237,10 @@ export async function verifyPayment(
     return {
       ok: true,
       paidAmountUSDC: Number(paidAmount) / 1_000_000,
+      productId,
+      customer,
     };
   } catch (err: any) {
-    // Network error during verification — don't auto-approve, flag for manual review
     return { ok: false, reason: `Payment verification network error: ${err.message}` };
   }
 }

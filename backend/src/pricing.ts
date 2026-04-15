@@ -254,61 +254,8 @@ export function buildQuote(input: EstimationInput): DynamicQuote {
   };
 }
 
-// ---------------------------------------------------------------------------
-// Legacy flat-rate calculator — preserved for backward compat with old /api/estimate
-// ---------------------------------------------------------------------------
-
-export const CONTRACT_PRICES: Record<string, number> = {
-  l2aas:    0,
-  zip:      47.50,
-  base:     97.53,
-  arbitrum: 97.53,
-  optimism: 97.53,
-  polygon:  97.53,
-  bsc:      31.17,
-  ethereum: 478.21,
-};
-
-export interface PriceEstimate {
-  destChain: string;
-  contractCount: number;
-  pricePerContract: number;
-  discountPct: number;
-  subtotal: number;
-  discountAmount: number;
-  totalUSDC: number;
-  isFree: boolean;
-  message: string;
-}
-
-export function getDiscountPct(contractCount: number): number {
-  return getVolumeDiscount(contractCount);
-}
-
-export function calculatePrice(destChain: string, contractCount: number): PriceEstimate {
-  const pricePerContract = CONTRACT_PRICES[destChain] ?? 97.53;
-  const isFree = pricePerContract === 0;
-
-  if (isFree) {
-    return {
-      destChain, contractCount, pricePerContract: 0, discountPct: 0,
-      subtotal: 0, discountAmount: 0, totalUSDC: 0, isFree: true,
-      message: 'Free migration to your L2aaS chain',
-    };
-  }
-
-  const discountPct = getDiscountPct(contractCount);
-  const subtotal = round2(pricePerContract * contractCount);
-  const discountAmount = round2(subtotal * discountPct);
-  const totalUSDC = round2(subtotal - discountAmount);
-
-  return {
-    destChain, contractCount,
-    pricePerContract: round2(pricePerContract * (1 - discountPct)),
-    discountPct, subtotal, discountAmount, totalUSDC, isFree: false,
-    message: `${contractCount} contract${contractCount !== 1 ? 's' : ''} to ${destChain}: $${totalUSDC} USDC${discountPct > 0 ? ` (${(discountPct * 100).toFixed(0)}% volume discount)` : ''}`,
-  };
-}
+// Legacy flat-rate calculator REMOVED (2026-04-16). All pricing must go through
+// buildQuote(). Callers: /api/quote in api.ts. Do not re-introduce CONTRACT_PRICES.
 
 export const LIMITS = {
   maxContractsPerOrder: 100,

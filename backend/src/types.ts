@@ -3,6 +3,7 @@ export interface ChainConfig {
   chainId: number;
   rpcUrls: string[];
   rpcaasUrl?: string;
+  rpcaasSubdomain?: string;
   explorerUrl: string;
   nativeCurrency: string;
 }
