@@ -27,6 +27,7 @@ import {
 } from './orders';
 import { buildSampleZip } from './sampler';
 import { executeOrder, isAtCapacity } from './executor';
+import { ethers } from 'ethers';
 
 export const apiRouter = Router();
 
@@ -318,6 +319,85 @@ apiRouter.get('/order/:id/download', (req: Request, res: Response) => {
     if (!res.headersSent) res.status(500).json({ error: err.message });
   });
   stream.pipe(res);
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/order/:id/refund
+// Refund the non-gas portion of a failed order to the original customer.
+// Gas already paid on-chain is NEVER refundable (on-chain consumed).
+//
+// Idempotent: safe to call multiple times; re-runs only if status == 'failed'
+// and refundTxHash is not yet set.
+// ---------------------------------------------------------------------------
+
+apiRouter.post('/order/:id/refund', async (req: Request, res: Response) => {
+  const order = getOrder(String(req.params.id));
+  if (!order) return res.status(404).json({ error: 'Order not found' });
+  if (order.status !== 'failed') {
+    return res.status(400).json({ error: `Order status is ${order.status}, refund only available for failed orders` });
+  }
+  if (order.refundNote?.startsWith('refunded tx=')) {
+    return res.json({ ok: true, note: order.refundNote });
+  }
+  if (!order.paymentVerified || !order.paymentTxHash) {
+    return res.status(400).json({ error: 'Order has no verified payment to refund' });
+  }
+
+  const refundAmountUSD = order.quote.totalUSDC - order.quote.gasPassthroughUSD;
+  if (refundAmountUSD <= 0) {
+    updateOrder(order.id, { refundNote: 'no refundable amount (gas-only)', status: 'refunded' });
+    return res.json({ ok: true, note: 'no refundable amount (gas-only)' });
+  }
+
+  const RPC = process.env.DEMO_L2_RPC || 'http://l2-rpc.opsalis-l2-demo.svc.cluster.local:8545';
+  const USDC = process.env.USDC_ADDRESS || '0xb081d16D40e4e4c27D6d8564d145Ab2933037111';
+  const REVENUE_KEY = process.env.CHAINCLONE_REVENUE_PRIVATE_KEY;
+  if (!REVENUE_KEY) {
+    return res.status(500).json({ error: 'Refund unavailable: revenue wallet key not configured' });
+  }
+
+  try {
+    // Look up original customer from the Paid event
+    const provider = new ethers.JsonRpcProvider(RPC);
+    const receipt = await provider.getTransactionReceipt(order.paymentTxHash);
+    if (!receipt) throw new Error('payment tx receipt missing');
+    const BILLING = (process.env.OPSALIS_BILLING_ADDRESS || '0xCEfD64724E6EAbD3372188d3b558b1e74dD27Bc6').toLowerCase();
+    const PAID_TOPIC = ethers.id('Paid(bytes32,bytes32,address,uint256,uint256)').toLowerCase();
+    let customer: string | undefined;
+    for (const log of receipt.logs) {
+      if (log.address.toLowerCase() === BILLING && log.topics[0]?.toLowerCase() === PAID_TOPIC) {
+        customer = '0x' + (log.topics[3] || '').slice(26);
+        break;
+      }
+    }
+    if (!customer) throw new Error('could not resolve customer from payment tx');
+
+    const wallet = new ethers.Wallet(REVENUE_KEY, provider);
+    const usdc = new ethers.Contract(
+      USDC,
+      ['function transfer(address to, uint256 amount) returns (bool)'],
+      wallet,
+    );
+    const amt = BigInt(Math.floor(refundAmountUSD * 1_000_000));
+    const tx = await usdc.transfer(customer, amt);
+    const r = await tx.wait();
+
+    updateOrder(order.id, {
+      refundNote: `refunded tx=${tx.hash} amount=$${refundAmountUSD.toFixed(2)} gas_withheld=$${order.quote.gasPassthroughUSD.toFixed(2)}`,
+      status: 'refunded',
+    });
+
+    return res.json({
+      ok: true,
+      refundTxHash: tx.hash,
+      refundAmountUSD,
+      gasWithheldUSD: order.quote.gasPassthroughUSD,
+      customer,
+      blockNumber: r?.blockNumber,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: `Refund failed: ${err.message}` });
+  }
 });
 
 // ---------------------------------------------------------------------------
